@@ -23,3 +23,11 @@ def user_pref_data(prefs):
 
 def all_user_pref_data(prefs):
     return [user_pref_data(prefs) for prefs in prefs]
+
+
+def images_data(imageData):
+    return {
+        "id": str(imageData["_id"]),
+        "topic": imageData["topic"],
+        "images": imageData["images"]
+    }

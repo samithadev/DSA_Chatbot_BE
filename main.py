@@ -1,9 +1,9 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from pydantic import BaseModel #data validation
 from typing import Optional
-from config import pref_collection, user_collection
-from database.schemas import individual_data, all_data, all_user_pref_data
-from database.models import LearningPreference, User
+from config import pref_collection, user_collection, images_collection
+from database.schemas import individual_data, all_data, all_user_pref_data, images_data
+from database.models import LearningPreference, User, TopicImages
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
@@ -150,5 +150,26 @@ async def get_user_prefs( userId: str):
     data = pref_collection.find( {"userId": userId} )
     return all_user_pref_data(data)
 
+#handle images
+@router.post("/add-images")
+async def add_images(new_images: TopicImages):
+    try:
+        images_dict = [dict(image) for image in new_images.images]
+
+        data = {
+            "topic": new_images.topic,
+            "images": images_dict
+        }
+
+        res = images_collection.insert_one(data)
+        return {"status":200, "id": str(res.inserted_id),"message": "Images added successfully!"}
+
+    except Exception as e:
+        return HTTPException(status_code=500, detail=str(e))
+    
+@router.get("/topic-images/{topic}")
+async def get_images( topic: str):
+    data = images_collection.find_one( {"topic": topic} )
+    return images_data(data) 
 
 app.include_router(router)
