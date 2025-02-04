@@ -2,7 +2,7 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from pydantic import BaseModel #data validation
 from typing import Optional
 from config import pref_collection, user_collection
-from database.schemas import individual_data, all_data
+from database.schemas import individual_data, all_data, all_user_pref_data
 from database.models import LearningPreference, User
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
@@ -36,8 +36,9 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 #JWT secret key
 SECRET_KEY = "d4e9d2f3a0c9b5f9b1e3f4c2f3b3d1b7"
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+ACCESS_TOKEN_EXPIRE_MINUTES = 120
 
+# User Authentication
 @router.post("/register")
 def create_user(user: User):
     db_user = user_collection.find_one({"username": user.username})
@@ -61,6 +62,10 @@ def login(username: str, password: str):
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
+
+    if "_id" in to_encode and isinstance(to_encode["_id"], ObjectId):
+        to_encode["_id"] = str(to_encode["_id"])
+
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
     else:
@@ -74,9 +79,11 @@ def login_for_access_token(form_data: User):
     user = login(form_data.username, form_data.password)
     if not user:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    user_id = str(user['_id']) if isinstance(user['_id'], ObjectId) else user['_id']
     
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(data={"sub": user["username"]}, expires_delta=access_token_expires)
+    access_token = create_access_token(data={"sub": user["username"], "userId":user_id}, expires_delta=access_token_expires)
     return {"access_token": access_token, "token_type": "bearer"}
 
 def verify_token(token: str):
@@ -95,6 +102,7 @@ async def verify_user_token(token:str):
     return {"message": "Token is valid"}
 
 
+# User preference
 @router.get("/")
 async def get_all_prefs():
     data = pref_collection.find() 
@@ -105,7 +113,7 @@ async def get_pref( id: str):
     data = pref_collection.find_one( {"_id": ObjectId(id)} )
     return individual_data(data)
 
-@router.post("/")
+@router.post("/pref")
 async def create_pref(new_pref: LearningPreference):
     try:
         new_pref.created_at = datetime.now()
@@ -129,8 +137,18 @@ async def update_pref(id: str, new_pref: LearningPreference):
     
     except Exception as e:
         return HTTPException(status_code=500, detail=str(e))
-    
 
+@router.get("/verify-chat/{id}")
+async def verify_chat(id: str):
+    data = pref_collection.find_one({"_id": ObjectId(id)})
+    if not data:
+        raise HTTPException(status_code=400, detail="No such record found")
+    return {"message": "Record found"}  
+
+@router.get("/previous_prefs/{userId}")
+async def get_user_prefs( userId: str):
+    data = pref_collection.find( {"userId": userId} )
+    return all_user_pref_data(data)
 
 
 app.include_router(router)
