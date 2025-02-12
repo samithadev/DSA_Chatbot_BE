@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 class LearningPreference(BaseModel):
     mode: str
@@ -25,3 +25,33 @@ class Image(BaseModel):
 class TopicImages(BaseModel):
     topic: str
     images: List[Image]
+
+# class ChatRequest(BaseModel):
+#     learning_mode: str  
+#     topic: str
+#     sub_topic: str
+#     student_level: str
+#     user_input: str
+#     userId: str 
+
+class Message(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: datetime = datetime.now()
+
+class Conversation(BaseModel):
+    user_id: str
+    preference_id: str
+    messages: List[Message]
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()
+
+class ChatRequest(BaseModel):
+    conversation_id: Optional[str]
+    user_id: str
+    preference_id:str
+    learning_mode: str
+    topic: str
+    sub_topic: str
+    student_level: str
+    user_input: str

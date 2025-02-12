@@ -1,15 +1,17 @@
+import os
 from fastapi import FastAPI, APIRouter, HTTPException, Depends
 from pydantic import BaseModel #data validation
 from typing import Optional
-from config import pref_collection, user_collection, images_collection
+from config import pref_collection, user_collection, images_collection, conversation_collection
 from database.schemas import individual_data, all_data, all_user_pref_data, images_data
-from database.models import LearningPreference, User, TopicImages
+from database.models import LearningPreference, User, TopicImages, ChatRequest, Conversation, Message
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from passlib.context import CryptContext
 from jose import JWTError, jwt
+import google.generativeai as genai
 
 
 app = FastAPI()
@@ -171,5 +173,296 @@ async def add_images(new_images: TopicImages):
 async def get_images( topic: str):
     data = images_collection.find_one( {"topic": topic} )
     return images_data(data) 
+
+# Configure Gemini API
+genai.configure(api_key='AIzaSyDfvIigq68nMiI_Zk8guGMzfRPC1pomdQw')
+
+async def get_gemini_response(prompt: str) -> str:
+    try:
+        # Initialize Gemini model
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Generate response
+        response = model.generate_content(prompt)
+        
+        # Return the text response
+        return response.text
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting Gemini response: {str(e)}")
+
+
+# @router.post("/chat")
+# async def handle_chat(chat_request: ChatRequest):
+#     try:
+#         # Fetch or create conversation
+#         if chat_request.conversation_id:
+#             conversation = conversation_collection.find_one(
+#                 {"_id": ObjectId(chat_request.conversation_id)}
+#             )
+#             if not conversation:
+#                 raise HTTPException(status_code=404, detail="Conversation not found")
+#         else:
+#             # Create new conversation
+#             conversation = Conversation(
+#                 preference_id= chat_request.preference_id,
+#                 user_id=chat_request.user_id,
+#                 messages=[]
+#             )
+#             conversation_collection.insert_one(dict(conversation))
+#             conversation = dict(conversation)
+
+#         # Add user message to history
+#         new_message = Message(
+#             role="user",
+#             content=chat_request.user_input
+#         )
+        
+#         # Construct context from conversation history
+#         if chat_request.conversation_id:
+#             recent_messages = conversation.get('messages', [])[-5:]
+#             conversation_context = "\n".join([
+#                 f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+#                 for msg in recent_messages
+#             ])
+#         else:
+#             conversation_context = ""
+        
+
+#         # Construct prompt with conversation history
+#         prompt = f"""
+#         You are an expert computer science tutor. Previous conversation context:
+
+#         {conversation_context}
+
+#         Current parameters:
+#         Learning Mode: {chat_request.learning_mode}
+#         Topic: {chat_request.topic}
+#         Sub-topic: {chat_request.sub_topic}
+#         Student Level: {chat_request.student_level}
+        
+#         Guidelines:
+#         1. For theory mode:
+#            - Focus on conceptual explanations
+#            - Explain theoretical foundations
+#            - Use appropriate diagrams or examples when needed
+#            - Connect concepts to broader computer science principles
+        
+#         2. For practical mode:
+#            - Provide implementation details
+#            - Include code examples
+#            - Give step-by-step instructions
+#            - Share best practices and common pitfalls
+        
+#         3. Adapt complexity for student level:
+#            - Beginner: Use simple terms, basic examples, and avoid jargon
+#            - Intermediate: Include technical details and moderate complexity
+#            - Expert: Provide in-depth explanations and advanced concepts
+        
+#         4. Response Format:
+#            - Start with a brief overview
+#            - Break down complex concepts
+#            - Include relevant examples
+#            - End with a practice suggestion or next steps
+        
+#         Current User Question/Input: {chat_request.user_input}
+        
+#         Provide a well-structured, clear response that matches the learning mode and student level while maintaining context from previous messages.
+#         """
+
+#         # Get response from Gemini
+#         response = await get_gemini_response(prompt)
+
+#         # Add assistant response to history
+#         assistant_message = Message(
+#             role="assistant",
+#             content=response
+#         )
+
+#         # Update conversation in database
+#         conversation_collection.update_one(
+#             {"_id": ObjectId(conversation['_id'])},
+#             {
+#                 "$push": {
+#                     "messages": {
+#                         "$each": [
+#                             dict(new_message),
+#                             dict(assistant_message)
+#                         ]
+#                     }
+#                 },
+#                 "$set": {"updated_at": datetime.now()}
+#             }
+#         )
+
+#         return {
+#             "status": 200,
+#             "response": response,
+#             "conversation_id": str(conversation['_id']),
+#             "message": "Chat response generated successfully"
+#         }
+
+#     except Exception as e:
+#         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/chat")
+async def handle_chat(chat_request: ChatRequest):
+    try:
+        conversation = None
+        # Handle existing conversation
+        if chat_request.conversation_id:
+            conversation = conversation_collection.find_one(
+                {"_id": ObjectId(chat_request.conversation_id)}
+            )
+            if not conversation:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            # Create new conversation
+            new_conversation = {
+                "preference_id": chat_request.preference_id,
+                "user_id": chat_request.user_id,
+                "messages": [],
+                "created_at": datetime.now(),
+                "updated_at": datetime.now()
+            }
+            # Insert and get the new conversation
+            result = conversation_collection.insert_one(new_conversation)
+            conversation = {
+                "_id": result.inserted_id,
+                **new_conversation
+            }
+
+        # Add user message to history
+        new_message = Message(
+            role="user",
+            content=chat_request.user_input
+        )
+        
+        # Construct context from conversation history
+        recent_messages = conversation.get('messages', [])[-5:]
+        conversation_context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+            for msg in recent_messages
+        ])
+
+        # Rest of your prompt construction code remains the same
+        prompt = f"""
+        You are an expert computer science tutor. Previous conversation context:
+
+        {conversation_context}
+
+        Current parameters:
+        Learning Mode: {chat_request.learning_mode}
+        Topic: {chat_request.topic}
+        Sub-topic: {chat_request.sub_topic}
+        Student Level: {chat_request.student_level}
+        
+        Guidelines:
+        1. For theory mode:
+           - Focus on conceptual explanations
+           - Explain theoretical foundations
+           - Use appropriate diagrams or examples when needed
+           - Connect concepts to broader computer science principles
+        
+        2. For practical mode:
+           - Provide implementation details
+           - Include code examples
+           - Give step-by-step instructions
+           - Share best practices and common pitfalls
+        
+        3. Adapt complexity for student level:
+           - Beginner: Use simple terms, basic examples, and avoid jargon
+           - Intermediate: Include technical details and moderate complexity
+           - Expert: Provide in-depth explanations and advanced concepts
+        
+        4. Response Format:
+           - Start with a brief overview
+           - Break down complex concepts
+           - Include relevant examples
+           - End with a practice suggestion or next steps
+        
+        Current User Question/Input: {chat_request.user_input}
+        
+        Provide a well-structured, clear response that matches the learning mode and student level while maintaining context from previous messages.
+        """
+
+        # Get response from Gemini
+        response = await get_gemini_response(prompt)
+
+        # Add assistant response to history
+        assistant_message = Message(
+            role="assistant",
+            content=response
+        )
+
+        # Update conversation in database using the conversation ID
+        conversation_collection.update_one(
+            {"_id": conversation["_id"]},
+            {
+                "$push": {
+                    "messages": {
+                        "$each": [
+                            dict(new_message),
+                            dict(assistant_message)
+                        ]
+                    }
+                },
+                "$set": {"updated_at": datetime.now()}
+            }
+        )
+
+        return {
+            "status": 200,
+            "response": response,
+            "conversation_id": str(conversation["_id"]),
+            "message": "Chat response generated successfully"
+        }
+
+    except Exception as e:
+        print(f"Error in handle_chat: {str(e)}")  # Add debugging
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.get("/conversation/{preference_id}/{user_id}")
+async def get_conversation_by_preference(preference_id: str, user_id: str):
+    try:
+        # Find conversation by preference_id and user_id
+        conversation = conversation_collection.find_one({
+            "preference_id": preference_id,
+            "user_id": user_id
+        })
+        
+        if conversation:
+            # Convert ObjectId to string for JSON serialization
+            conversation['_id'] = str(conversation['_id'])
+            return {"conversation": conversation}
+        
+        return {"conversation": None}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/deleteconv/{conversationId}")
+async def delete_conversation(conversationId: str):
+    try:
+        # Convert string ID to ObjectId
+        result = conversation_collection.find_one_and_delete({"_id": ObjectId(conversationId)})
+        if not result:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        return {"message": "Conversation deleted successfully"}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.delete("/deletepref/{preferenceId}")
+async def delete_preference(preferenceId: str):  # Fixed function name
+    try:
+        # Convert string ID to ObjectId
+        result = pref_collection.find_one_and_delete({"_id": ObjectId(preferenceId)})
+        if not result:
+            raise HTTPException(status_code=404, detail="Preference not found")
+        return {"message": "Preference deleted successfully"}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 app.include_router(router)

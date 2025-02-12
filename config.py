@@ -11,3 +11,4 @@ db = client.chatbot_db
 pref_collection = db["learning_pref"]
 user_collection = db["users"]
 images_collection = db["topic_images"]
+conversation_collection = db['conversations']
