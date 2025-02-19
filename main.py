@@ -392,6 +392,9 @@ async def handle_chat(chat_request: ChatRequest):
             Previous conversation context:
             {conversation_context}
 
+            these are some relevent images for this topic with image number and description.when you give answers if these image descriptions relevent to answers give reference like this. example: (reference: image 1)
+            {chat_request.relevant_images}
+
             Current parameters:
             Learning Mode: {chat_request.learning_mode}
             Topic: {chat_request.topic}

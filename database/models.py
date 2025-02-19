@@ -46,6 +46,9 @@ class Conversation(BaseModel):
     created_at: datetime = datetime.now()
     updated_at: datetime = datetime.now()
 
+class ImageData(BaseModel):
+    imageNumber: int
+    imageDescription: str
 class ChatRequest(BaseModel):
     conversation_id: Optional[str]
     user_id: str
@@ -55,3 +58,4 @@ class ChatRequest(BaseModel):
     sub_topic: str
     student_level: str
     user_input: str
+    relevant_images: List[ImageData]
