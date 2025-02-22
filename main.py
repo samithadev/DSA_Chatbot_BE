@@ -13,6 +13,15 @@ from passlib.context import CryptContext
 from jose import JWTError, jwt
 import google.generativeai as genai
 
+# langchain imports
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+# from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
+# from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
+from langchain.chains import RetrievalQA
+from langchain_community.document_loaders import PyPDFLoader
+
 
 app = FastAPI()
 router = APIRouter()
@@ -39,6 +48,105 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 SECRET_KEY = "d4e9d2f3a0c9b5f9b1e3f4c2f3b3d1b7"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 120
+
+class AgenticRAG:
+    def __init__(self):
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len
+        )
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2"  # Small, fast, and effective model
+        )
+        self.vector_store = None
+        # Persist Chroma database to disk
+        self.vector_store = Chroma(
+            persist_directory="./chroma_db",
+            embedding_function=self.embeddings
+        )
+    
+    async def is_initialized(self):
+        """Check if the vector store has been initialized"""
+        try:
+            # Check if collection exists and has documents
+            return self.vector_store._collection.count() > 0
+        except:
+            return False
+
+    async def process_pdf(self, file_path: str, topic: str):
+        """Process PDF and store chunks in vector database"""
+        try:
+            # Load PDF
+            loader = PyPDFLoader(file_path)
+            documents = loader.load()
+            
+            # Split text into chunks
+            chunks = self.text_splitter.split_documents(documents)
+            
+            # Add metadata to chunks
+            for chunk in chunks:
+                chunk.metadata['topic'] = topic
+            
+            # Create or update vector store
+            if not self.vector_store:
+                self.vector_store = Chroma.from_documents(
+                    documents=chunks,
+                    embedding=self.embeddings
+                )
+            else:
+                self.vector_store.add_documents(chunks)
+            
+            return {"status": "success", "message": f"Processed {len(chunks)} chunks"}
+            
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
+    async def retrieve_relevant_content(self, query: str, topic: str, k: int = 3) -> str:
+        """Retrieve relevant content based on query and topic"""
+        if not self.vector_store:
+            return ""
+        
+        # Create metadata filter for topic
+        filter_dict = {"topic": topic}
+        
+        # Search for relevant documents
+        docs = self.vector_store.similarity_search(
+            query,
+            k=k,
+            filter=filter_dict
+        )
+        
+        # Combine relevant content
+        relevant_content = "\n\n".join([doc.page_content for doc in docs])
+        return relevant_content
+
+rag_system = AgenticRAG()
+
+@router.get("/check-rag-status")
+async def check_rag_status():
+    is_init = await rag_system.is_initialized()
+    return {"initialized": is_init}
+
+# Add these routes to your existing router
+@router.post("/initialize-rag")
+async def initialize_rag():
+
+    if await rag_system.is_initialized():
+        return {"message": "RAG system already initialized"}
+    
+    """Initialize RAG system with existing PDFs"""
+    pdf_dir = "./pdfs"  # Update with your PDF directory
+    topics = ["stack", "queue", "linkedlist"]
+    
+    results = []
+    for topic in topics:
+        pdf_path = os.path.join(pdf_dir, f"{topic}.pdf")
+        if os.path.exists(pdf_path):
+            result = await rag_system.process_pdf(pdf_path, topic)
+            results.append({topic: result})
+    
+    return {"message": "RAG system initialized", "results": results}
 
 # User Authentication
 @router.post("/register")
@@ -305,6 +413,26 @@ async def get_gemini_response(prompt: str) -> str:
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
 
+async def optimized_relevant_content(user_input, relevant_content):
+
+    prompt = f""" 
+        User Query: {user_input}
+
+        Given Reference Material:
+        {relevant_content}
+
+        Task:
+        - Extract only the most relevant details from the reference material that directly answer the user query.
+        - Do not add any external information; only use the given reference material.
+        - Summarize the extracted content concisely while keeping key details intact.
+        - Ensure clarity and coherence in the final output.
+
+        Output:
+        Provide a structured and concise summary of the most relevant information.
+    """
+    return await get_gemini_response(prompt)
+
+
 @router.post("/chat")
 async def handle_chat(chat_request: ChatRequest):
     try:
@@ -339,7 +467,7 @@ async def handle_chat(chat_request: ChatRequest):
         )
         
         # Construct context from conversation history
-        recent_messages = conversation.get('messages', [])[-5:]
+        recent_messages = conversation.get('messages', [])[-3:]
         conversation_context = "\n".join([
             f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
             for msg in recent_messages
@@ -386,11 +514,21 @@ async def handle_chat(chat_request: ChatRequest):
         # Provide a well-structured, clear response that matches the learning mode and student level while maintaining context from previous messages.
         # """
 
+        relevant_content = await rag_system.retrieve_relevant_content(
+            query=chat_request.user_input,
+            topic=chat_request.topic.lower()
+        )
+
+        reference_content = await optimized_relevant_content(chat_request.user_input, relevant_content)
+
         prompt = f"""
             You are an expert computer science tutor focused specifically on {chat_request.topic} and {chat_request.sub_topic}. Adapt your teaching style based on student responses.
 
             Previous conversation context:
             {conversation_context}
+
+            Relevant reference material:
+            {reference_content}
 
             these are some relevent images for this topic with image number and description.when you give answers if these image descriptions relevent to answers give reference like this. example: (reference: image 1)
             {chat_request.relevant_images}
@@ -441,11 +579,13 @@ async def handle_chat(chat_request: ChatRequest):
             - Focus on clear concept explanations
             - Use real-world analogies
             - Provide visual descriptions when helpful
+            - if no any programming language specified use only java programming language
             
             Practical Mode:
             - Show code examples
             - Explain implementation steps
             - Demonstrate practical usage
+            - if no any programming language specified use only java programming language
             
             6. Level-Based Adaptation:
             Beginner: 
@@ -507,6 +647,7 @@ async def handle_chat(chat_request: ChatRequest):
         return {
             "status": 200,
             "response": response,
+            "promt": prompt,
             "conversation_id": str(conversation["_id"]),
             "message": "Chat response generated successfully"
         }
