@@ -1,23 +1,18 @@
-# Use Python 3.12.6 as base image
-FROM python:3.12.6
+# Use a lightweight Python image
+FROM python:3.12-slim
 
-# Set working directory
+# Set the working directory
 WORKDIR /app
 
-# Copy requirements first to leverage Docker cache
-COPY requirements.txt .
+# Copy and install dependencies first (for better caching)
+COPY requirements.txt .  
+RUN pip install --no-cache-dir -r requirements.txt  
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Copy the application code
+COPY ./app /app  
 
-# Copy the rest of the application
-COPY . .
+# Expose port 8080
+EXPOSE 8080
 
-# Create directory for PDFs and Chroma DB
-RUN mkdir -p pdfs chroma_db
-
-# Expose port
-EXPOSE 8000
-
-# Command to run the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Set the default command
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
