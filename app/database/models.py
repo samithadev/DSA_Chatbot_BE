@@ -1,3 +1,4 @@
+from fastapi import File, UploadFile
 from pydantic import BaseModel
 from datetime import datetime
 from typing import List, Optional
@@ -24,6 +25,7 @@ class Image(BaseModel):
 
 class TopicImages(BaseModel):
     topic: str
+    pdf: UploadFile = File(...)
     images: List[Image]
 
 # class ChatRequest(BaseModel):
@@ -59,3 +61,7 @@ class ChatRequest(BaseModel):
     student_level: str
     user_input: str
     relevant_images: List[ImageData]
+
+class Topic(BaseModel):
+    topic: str
+    status: str

@@ -31,3 +31,9 @@ def images_data(imageData):
         "topic": imageData["topic"],
         "images": imageData["images"]
     }
+
+def topic_status(topicStatus):
+    return {
+        "topic": topicStatus["topic"],
+        "status": topicStatus["status"]
+    }

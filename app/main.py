@@ -1,9 +1,13 @@
+import asyncio
+import json
 import os
-from fastapi import FastAPI, APIRouter, HTTPException, Depends
+import shutil
+import uuid
+from fastapi import Body, FastAPI, APIRouter, File, Form, HTTPException, Depends, Path, UploadFile
 from pydantic import BaseModel #data validation
-from typing import Optional
-from config import pref_collection, user_collection, images_collection, conversation_collection
-from database.schemas import individual_data, all_data, all_user_pref_data, images_data
+from typing import Dict, List, Optional
+from config import pref_collection, user_collection, images_collection, conversation_collection, topic_status_collection
+from database.schemas import individual_data, all_data, all_user_pref_data, images_data, topic_status
 from database.models import LearningPreference, User, TopicImages, ChatRequest, Conversation, Message
 from bson.objectid import ObjectId
 from datetime import datetime, timedelta
@@ -62,18 +66,73 @@ class AgenticRAG:
         self.vector_store = None
         # Persist Chroma database to disk
         self.vector_store = Chroma(
-            persist_directory="./chroma_db",
             embedding_function=self.embeddings
         )
     
-    async def is_initialized(self):
-        """Check if the vector store has been initialized"""
+    # async def clear_vector_db(self):
+    #     """
+    #     Deletes all data in the Chroma vector database by removing the persistent directory.
+    #     """
+    #     try:
+    #         if os.path.exists("./chroma_db"):
+    #             await asyncio.to_thread(shutil.rmtree, "./chroma_db")
+    #         self.vector_store = Chroma(
+    #             persist_directory="./chroma_db",
+    #             embedding_function=self.embeddings
+    #         )
+    #         return {"message": "Vector database cleared successfully."}
+    #     except Exception as e:
+    #         return {"error": str(e)}
+    
+    async def clear_vector_db(self):
+        """
+        Completely clears the Chroma vector database by removing the persistent directory
+        and reinitializing the vector store.
+        """
         try:
-            # Check if collection exists and has documents
-            return self.vector_store._collection.count() > 0
-        except:
-            return False
+            # Close the current vector store client to release file handles
+            if self.vector_store:
+                ids = self.vector_store.get()['ids']
+                self.vector_store.delete(ids)
+                
+            return {"message": "Vector database completely cleared ids: {ids}"}
+        except Exception as e:
+            return {"error": f"Failed to clear vector database: {str(e)}"}
+    
+    async def is_initialized(self):
+        """Check if the vector store has been initialized and verify topics"""
+        try:
+            
+            # Check if vector store exists and is initialized
+            if not self.vector_store or not hasattr(self.vector_store, "_collection"):
+                return {
+                    "status": "uninitialized",
+                    "message": "Vector store is not initialized"
+                }
+            
+            topics_cursor = images_collection.distinct("topic")
+            all_topics = list(topics_cursor)  # Convert to list
 
+            if not all_topics:
+                return {"status": "error", "message": "No topics found in database"}
+
+            # Get all topics from the vector store
+            vector_topics = set()
+            for doc in self.vector_store._collection.get()["metadatas"]:
+                if "topic" in doc:
+                    vector_topics.add(doc["topic"])
+
+            # Find missing topics
+            missing_topics = [topic for topic in all_topics if topic not in vector_topics]
+
+            if missing_topics:
+                return {"status": "partial", "available_topics": list(vector_topics), "missing_topics": missing_topics}
+            else:
+                return {"status": "initialized", "available_topics": all_topics}
+
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
     async def process_pdf(self, file_path: str, topic: str):
         """Process PDF and store chunks in vector database"""
         try:
@@ -132,19 +191,23 @@ async def check_rag_status():
 @router.post("/initialize-rag")
 async def initialize_rag():
 
-    if await rag_system.is_initialized():
-        return {"message": "RAG system already initialized"}
+    init_status = await rag_system.is_initialized()
     
-    """Initialize RAG system with existing PDFs"""
+    if init_status["status"] == "initialized":
+        return {"message": "RAG system already fully initialized"}
+    
     pdf_dir = "./pdfs"  # Update with your PDF directory
-    topics = ["stack", "queue", "linkedlist"]
+    topics_to_initialize = init_status.get("missing_topics")
+    
     
     results = []
-    for topic in topics:
+    for topic in topics_to_initialize:
         pdf_path = os.path.join(pdf_dir, f"{topic}.pdf")
         if os.path.exists(pdf_path):
             result = await rag_system.process_pdf(pdf_path, topic)
             results.append({topic: result})
+        else:
+            results.append({topic: "PDF not found"})
     
     return {"message": "RAG system initialized", "results": results}
 
@@ -260,23 +323,97 @@ async def get_user_prefs( userId: str):
     data = pref_collection.find( {"userId": userId} )
     return all_user_pref_data(data)
 
-#handle images
+@router.get("/all-topics")
+async def get_all_topics():
+    data = images_collection.find()
+    topics =  [d["topic"] for d in data]
+    return topics
+
+PDF_STORAGE_DIR = "pdfs"
+os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
+
 @router.post("/add-images")
-async def add_images(new_images: TopicImages):
+async def add_images(
+    topic: str = Form(...),  # Required topic
+    images: Optional[str] = Form(None),  # Optional images (JSON string)
+    pdf: Optional[UploadFile] = File(default=None)  # Optional PDF upload
+):
     try:
-        images_dict = [dict(image) for image in new_images.images]
+        # Parse images JSON if provided, else default to an empty list
+        images_list = json.loads(images) if images else []
 
-        data = {
-            "topic": new_images.topic,
-            "images": images_dict
-        }
+        # Check if topic exists in DB
+        existing_record = images_collection.find_one({"topic": topic})
 
-        res = images_collection.insert_one(data)
-        return {"status":200, "id": str(res.inserted_id),"message": "Images added successfully!"}
+        if existing_record and pdf:
+            pdf_filename = topic.join([uuid.uuid4().hex, ".pdf"])
+        else:
+            pdf_filename = None
+
+        if pdf:
+            # pdf_filename = pdf.filenamepdf.filename
+            if pdf.filename == "":  # Check if empty file is uploaded
+                pdf_filename = None 
+            else:
+                file_extension = os.path.splitext(pdf.filename)[1]  # Gets extension with dot (.pdf)
+            
+                # Use topic name as the filename
+                pdf_filename = f"{topic}{file_extension}"
+
+                pdf_path = os.path.join(PDF_STORAGE_DIR, pdf_filename)
+
+            if os.path.exists(pdf_path):
+                return {"status": False, "message": f"PDF file '{pdf_filename}' already exists"}
+
+            with open(pdf_path, "wb") as buffer:
+                shutil.copyfileobj(pdf.file, buffer)
+
+            pdf.file.seek(0)
+
+        if existing_record:
+            if images_list:
+                existing_images = existing_record.get("images", [])
+                max_image_no = max((img["imageNo"] for img in existing_images), default=0)
+
+                new_images = [
+                    {"imageNo": max_image_no + i + 1, "imageDes": img["imageDes"], "imageUrl": img["imageUrl"]}
+                    for i, img in enumerate(images_list)
+                ]
+
+                images_collection.update_one(
+                    {"topic": topic},
+                    {"$push": {"images": {"$each": new_images}}}
+                )
+
+            return {"status": 200, "message": "PDF and images (if any) added successfully to existing topic!"}
+
+        else:
+            new_data = {
+                "topic": topic,
+                "images": [
+                    {"imageNo": i + 1, "imageDes": img["imageDes"], "imageUrl": img["imageUrl"]}
+                    for i, img in enumerate(images_list)
+                ] if images_list else [],
+                "pdf": pdf_filename if pdf else None
+            }
+            res = images_collection.insert_one(new_data)
+
+            return {
+                "status": 200,
+                "id": str(res.inserted_id),
+                "message": "PDF and images (if any) added successfully!"
+            }
+
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format for images")
+
+    except asyncio.CancelledError:
+        print("Request was cancelled by the client or server!")
+        raise HTTPException(status_code=499, detail="Request cancelled")
 
     except Exception as e:
-        return HTTPException(status_code=500, detail=str(e))
-    
+        raise HTTPException(status_code=500, detail=str(e))
+     
 @router.get("/topic-images/{topic}")
 async def get_images( topic: str):
     data = images_collection.find_one( {"topic": topic} )
@@ -288,7 +425,7 @@ genai.configure(api_key='AIzaSyDfvIigq68nMiI_Zk8guGMzfRPC1pomdQw')
 async def get_gemini_response(prompt: str) -> str:
     try:
         # Initialize Gemini model
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.0-flash')
         
         # Generate response
         response = model.generate_content(prompt)
@@ -299,119 +436,6 @@ async def get_gemini_response(prompt: str) -> str:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error getting Gemini response: {str(e)}")
 
-
-# @router.post("/chat")
-# async def handle_chat(chat_request: ChatRequest):
-#     try:
-#         # Fetch or create conversation
-#         if chat_request.conversation_id:
-#             conversation = conversation_collection.find_one(
-#                 {"_id": ObjectId(chat_request.conversation_id)}
-#             )
-#             if not conversation:
-#                 raise HTTPException(status_code=404, detail="Conversation not found")
-#         else:
-#             # Create new conversation
-#             conversation = Conversation(
-#                 preference_id= chat_request.preference_id,
-#                 user_id=chat_request.user_id,
-#                 messages=[]
-#             )
-#             conversation_collection.insert_one(dict(conversation))
-#             conversation = dict(conversation)
-
-#         # Add user message to history
-#         new_message = Message(
-#             role="user",
-#             content=chat_request.user_input
-#         )
-        
-#         # Construct context from conversation history
-#         if chat_request.conversation_id:
-#             recent_messages = conversation.get('messages', [])[-5:]
-#             conversation_context = "\n".join([
-#                 f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
-#                 for msg in recent_messages
-#             ])
-#         else:
-#             conversation_context = ""
-        
-
-#         # Construct prompt with conversation history
-#         prompt = f"""
-#         You are an expert computer science tutor. Previous conversation context:
-
-#         {conversation_context}
-
-#         Current parameters:
-#         Learning Mode: {chat_request.learning_mode}
-#         Topic: {chat_request.topic}
-#         Sub-topic: {chat_request.sub_topic}
-#         Student Level: {chat_request.student_level}
-        
-#         Guidelines:
-#         1. For theory mode:
-#            - Focus on conceptual explanations
-#            - Explain theoretical foundations
-#            - Use appropriate diagrams or examples when needed
-#            - Connect concepts to broader computer science principles
-        
-#         2. For practical mode:
-#            - Provide implementation details
-#            - Include code examples
-#            - Give step-by-step instructions
-#            - Share best practices and common pitfalls
-        
-#         3. Adapt complexity for student level:
-#            - Beginner: Use simple terms, basic examples, and avoid jargon
-#            - Intermediate: Include technical details and moderate complexity
-#            - Expert: Provide in-depth explanations and advanced concepts
-        
-#         4. Response Format:
-#            - Start with a brief overview
-#            - Break down complex concepts
-#            - Include relevant examples
-#            - End with a practice suggestion or next steps
-        
-#         Current User Question/Input: {chat_request.user_input}
-        
-#         Provide a well-structured, clear response that matches the learning mode and student level while maintaining context from previous messages.
-#         """
-
-#         # Get response from Gemini
-#         response = await get_gemini_response(prompt)
-
-#         # Add assistant response to history
-#         assistant_message = Message(
-#             role="assistant",
-#             content=response
-#         )
-
-#         # Update conversation in database
-#         conversation_collection.update_one(
-#             {"_id": ObjectId(conversation['_id'])},
-#             {
-#                 "$push": {
-#                     "messages": {
-#                         "$each": [
-#                             dict(new_message),
-#                             dict(assistant_message)
-#                         ]
-#                     }
-#                 },
-#                 "$set": {"updated_at": datetime.now()}
-#             }
-#         )
-
-#         return {
-#             "status": 200,
-#             "response": response,
-#             "conversation_id": str(conversation['_id']),
-#             "message": "Chat response generated successfully"
-#         }
-
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
 
 async def optimized_relevant_content(user_input, relevant_content):
 
@@ -432,6 +456,17 @@ async def optimized_relevant_content(user_input, relevant_content):
     """
     return await get_gemini_response(prompt)
 
+@router.delete("/vector-db/clear")
+async def clear_db():
+    """
+    Deletes all collections from the vector database.
+    """
+    try:
+        # Assuming `vector_store` has a method to list and delete collections
+        await rag_system.clear_vector_db()
+        return {"message": "All collections deleted successfully."}
+    except Exception as e:
+        return {"error": str(e)}
 
 @router.post("/chat")
 async def handle_chat(chat_request: ChatRequest):
@@ -472,47 +507,6 @@ async def handle_chat(chat_request: ChatRequest):
             f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
             for msg in recent_messages
         ])
-
-        # Rest of your prompt construction code remains the same
-        # prompt = f"""
-        # You are an expert computer science tutor. Previous conversation context:
-
-        # {conversation_context}
-
-        # Current parameters:
-        # Learning Mode: {chat_request.learning_mode}
-        # Topic: {chat_request.topic}
-        # Sub-topic: {chat_request.sub_topic}
-        # Student Level: {chat_request.student_level}
-        
-        # Guidelines:
-        # 1. For theory mode:
-        #    - Focus on conceptual explanations
-        #    - Explain theoretical foundations
-        #    - Use appropriate diagrams or examples when needed
-        #    - Connect concepts to broader computer science principles
-        
-        # 2. For practical mode:
-        #    - Provide implementation details
-        #    - Include code examples
-        #    - Give step-by-step instructions
-        #    - Share best practices and common pitfalls
-        
-        # 3. Adapt complexity for student level:
-        #    - Beginner: Use simple terms, basic examples, and avoid jargon
-        #    - Intermediate: Include technical details and moderate complexity
-        #    - Expert: Provide in-depth explanations and advanced concepts
-        
-        # 4. Response Format:
-        #    - Start with a brief overview
-        #    - Break down complex concepts
-        #    - Include relevant examples
-        #    - End with a practice suggestion or next steps
-        
-        # Current User Question/Input: {chat_request.user_input}
-        
-        # Provide a well-structured, clear response that matches the learning mode and student level while maintaining context from previous messages.
-        # """
 
         relevant_content = await rag_system.retrieve_relevant_content(
             query=chat_request.user_input,
